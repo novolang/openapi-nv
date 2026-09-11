@@ -1,0 +1,557 @@
+// oapidoc.nv — OpenAPI 3.1 as a typed value.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A DOCUMENT IS A VALUE AND NOT A JSON TREE.  The alternative — hand a
+// caller the parsed JSON and let them walk it — is what most OpenAPI
+// tooling does, and it is why most OpenAPI tooling disagrees about what
+// a document says.  `paths."/users".get.parameters[0].schema.$ref` is
+// eight lookups that can each be absent, and a program written against
+// it silently does nothing on a document that spells one of them
+// differently.  Here the shape is the type, a document that parsed is a
+// document whose structure held, and a caller reads fields.
+//
+// EVERY STRING IN A DOCUMENT IS COPIED, AND THAT IS DELIBERATE — the
+// opposite of this lane's other three packages.  A route match happens
+// per request and a document is read once at start-up, so the trade is
+// the other way round: a document outlives the bytes it was parsed
+// from, and a value holding spans into a string the caller may drop is
+// a value that cannot be kept.
+//
+// `$ref` IS A SUM AND NOT A STRING, and that is the seam with
+// schema-nv.  A reference is either local — a pointer into this
+// document's own components — or external, which means READING another
+// document, which a `core` package may not do.  `external_refs` names
+// the URIs, the host fetches them, `oapivalid.compile` is handed them
+// back.  An OpenAPI document from outside therefore cannot make a
+// program fetch a URL: the program decides what it fetches, and this
+// package has no `[net]` to do it with.
+//
+// WHAT IS MODELLED, AND WHAT IS DELIBERATELY A JSON VALUE.  Everything
+// the specification gives a fixed shape is a field here.  The three
+// places it does not — a schema object, an example, and a vendor
+// extension — stay `JsonValueH`, because each is by definition
+// arbitrary and a type over them would be a type that refuses valid
+// documents.  Vendor extensions in particular: `x-` keys are how every
+// gateway, code generator and documentation renderer carries what it
+// needs, and a parser that dropped them would produce a document that
+// round-trips to something its owner does not recognise.
+
+// Which HTTP method an operation is for.
+//
+// The eight the specification's Path Item Object names, and no more: a
+// path item's operation fields are a closed list, so a method outside
+// them is not an operation that this document can describe.
+pub enum OapiMethod
+    OapiGet
+    OapiPut
+    OapiPost
+    OapiDelete
+    OapiOptions
+    OapiHead
+    OapiPatch
+    OapiTrace
+
+// Where a parameter is carried.
+pub enum OapiParamIn
+    // In the path template: `/users/{id}`. Always required — the
+    // specification says so, and `check` enforces it, because a path
+    // parameter that was optional would describe two different paths.
+    OapiInPath
+    // In the query string.
+    OapiInQuery
+    // In a request header. `Accept`, `Content-Type` and
+    // `Authorization` are excluded by the specification and are
+    // described by the media types and the security schemes instead.
+    OapiInHeader
+    // In the `Cookie` header, as one of its pairs.
+    OapiInCookie
+
+// How a parameter's value is serialised into its location.
+//
+// Seven styles, and the reason this is modelled rather than defaulted:
+// `?tags=a&tags=b` and `?tags=a,b` are the same parameter under
+// different `style`/`explode` combinations, and a validator that
+// assumed one of them rejects half the clients that exist.
+pub enum OapiStyle
+    OapiStyleMatrix
+    OapiStyleLabel
+    OapiStyleForm
+    OapiStyleSimple
+    OapiStyleSpaceDelimited
+    OapiStylePipeDelimited
+    OapiStyleDeepObject
+
+// A schema, a reference to one, or nothing.
+//
+// **The seam with schema-nv, and the reason this package is `core`.**
+pub enum OapiSchemaRef
+    // No schema at all. Legal, and different from an empty one: a
+    // parameter with no schema constrains nothing, and a validator must
+    // not invent a constraint the document did not state.
+    OapiSchemaAbsent
+    // A schema written inline, as a JSON Schema 2020-12 document.
+    //
+    // `JsonValueH` rather than a type, because a schema is by
+    // definition arbitrary and schema-nv is what understands it. A type
+    // over it here would be a second, worse JSON Schema model that
+    // refused valid documents.
+    OapiSchemaInline(schema: JsonValueH)
+    // `#/components/schemas/Pet` — a JSON Pointer into this document.
+    OapiRefLocal(pointer: Str)
+    // `https://example.com/schemas/pet.json#/Pet` — another document.
+    //
+    // Resolving this means READING, which this package cannot do.
+    // `external_refs` names it, the host fetches it, and
+    // `oapivalid.compile` is handed the result.
+    OapiRefExternal(uri: Str)
+
+// Contact details for the API's owner.
+pub struct OapiContact
+    name: Str
+    url: Str
+    email: Str
+
+// The API's licence.
+pub struct OapiLicense
+    name: Str
+    // An SPDX identifier. New in 3.1, and mutually exclusive with
+    // `url` — `check` reports a document that sets both, because a
+    // reader has no rule for which wins.
+    identifier: Str
+    url: Str
+
+// What the API is and who owns it.
+pub struct OapiInfo
+    title: Str
+    // New in 3.1: a short line beside the longer `description`.
+    summary: Str
+    description: Str
+    terms_of_service: Str
+    contact: OapiContact
+    license: OapiLicense
+    // The API's own version, which is NOT the OpenAPI version. The two
+    // being different fields with the same word in them is the mistake
+    // a document makes once.
+    version: Str
+
+// One of a server URL's `{variable}` slots.
+pub struct OapiServerVar
+    name: Str
+    default_value: Str
+    // The values the variable may take. Empty means unconstrained; a
+    // non-empty list that does not contain `default_value` is a
+    // document error, and `check` reports it.
+    enum_values: [Str]
+    description: Str
+
+// A server the API is reachable at.
+pub struct OapiServer
+    url: Str
+    description: Str
+    variables: [OapiServerVar]
+
+// A header a response carries, described.
+//
+// A parameter in everything but name and location: the specification
+// defines a Header Object as a Parameter Object without `name` and
+// `in`. Modelled separately so that neither can be used where the other
+// belongs.
+pub struct OapiHeaderSpec
+    name: Str
+    description: Str
+    required: Bool
+    deprecated: Bool
+    schema: OapiSchemaRef
+
+// One media type in a request body or a response.
+pub struct OapiMediaType
+    // `application/json`, `text/*`, `*/*`. Matched by ESSENCE and with
+    // wildcards, which is the same rule an `Accept` header follows —
+    // `oapivalid` does that comparison, and the README names mime-nv as
+    // the package that would own it if this one took a dependency.
+    media_type: Str
+    schema: OapiSchemaRef
+    // An example, as an arbitrary JSON value. Never validated against
+    // the schema by this package: an example that does not match is a
+    // documentation bug and `check` reports it, but a document is not
+    // refused for one.
+    example: JsonValueH
+
+// A request's body, described.
+pub struct OapiRequestBody
+    description: Str
+    // Whether a request must carry one.
+    //
+    // Defaults to FALSE in the specification, which surprises everybody
+    // — a `POST` with a `requestBody` that forgot `required: true`
+    // describes an endpoint that accepts an empty body. `check` reports
+    // it as a warning rather than an error, because it is legal and
+    // almost never meant.
+    required: Bool
+    content: [OapiMediaType]
+
+// One response, by status.
+pub struct OapiResponse
+    // `"200"`, `"4XX"`, or `"default"`. A string because two of the
+    // three are not numbers, and a type that made it an `Int` would
+    // have to carry the other two somewhere else.
+    status: Str
+    // Required by the specification, and the one field of a response
+    // that always has to be written.
+    description: Str
+    headers: [OapiHeaderSpec]
+    content: [OapiMediaType]
+
+// A parameter, in any of the four locations.
+pub struct OapiParam
+    name: Str
+    location: OapiParamIn
+    description: Str
+    required: Bool
+    deprecated: Bool
+    style: OapiStyle
+    explode: Bool
+    schema: OapiSchemaRef
+
+// Which security schemes a request must satisfy.
+//
+// A list of alternatives, each of which is a set of requirements that
+// must ALL hold — the specification's OR-of-ANDs, which is the shape
+// that lets an endpoint accept either a bearer token or a pair of API
+// keys.  Modelled rather than flattened because flattening it loses the
+// distinction between "either of these" and "both of these", and that
+// distinction is the whole of an authorisation policy.
+pub struct OapiSecurityReq
+    // Each entry names a scheme in `components.security_schemes` and
+    // the scopes it needs. An empty list of scopes is the usual case
+    // and means the scheme itself is enough.
+    schemes: [(Str, [Str])]
+
+// How a caller authenticates.
+pub enum OapiSecurityScheme
+    // `type: apiKey`: a named value in a header, a query parameter or a
+    // cookie.
+    OapiSecApiKey(name: Str, location: OapiParamIn, description: Str)
+    // `type: http`: an `Authorization` header with a scheme —
+    // `bearer`, `basic`. `bearer_format` is documentation only, which
+    // is worth saying: a document claiming `JWT` is a claim about what
+    // the service does, and nothing here checks it.
+    OapiSecHttp(scheme: Str, bearer_format: Str, description: Str)
+    // `type: oauth2`, with its flows as raw JSON.
+    //
+    // The flows object is four alternative shapes with different
+    // required fields, and modelling it here would be modelling OAuth
+    // rather than OpenAPI — oauth2-nv's row on the plan is where that
+    // belongs. `check` verifies the shape; nothing here interprets it.
+    OapiSecOAuth2(flows: JsonValueH, description: Str)
+    // `type: openIdConnect`: a discovery URL.
+    //
+    // Never fetched. This package is `core` and has no `[net]`, which
+    // means a document cannot make a program call an identity provider
+    // it did not choose.
+    OapiSecOpenIdConnect(url: Str, description: Str)
+    // `type: mutualTLS`. New in 3.1, and nothing about it is
+    // configurable.
+    OapiSecMutualTls(description: Str)
+
+// A named schema in `components.schemas`.
+pub struct OapiNamedSchema
+    name: Str
+    schema: JsonValueH
+
+// The reusable objects a document defines.
+pub struct OapiComponents
+    schemas: [OapiNamedSchema]
+    responses: [(Str, OapiResponse)]
+    parameters: [(Str, OapiParam)]
+    request_bodies: [(Str, OapiRequestBody)]
+    headers: [(Str, OapiHeaderSpec)]
+    security_schemes: [(Str, OapiSecurityScheme)]
+
+// One operation: a method on a path.
+pub struct OapiOperation
+    method: OapiMethod
+    // The unique name a code generator uses. Empty is legal and is the
+    // reason generated clients have names like `getUsersIdGet`;
+    // `check` reports an operation without one, and reports two
+    // operations that share one, because the specification requires
+    // uniqueness and nothing enforces it.
+    operation_id: Str
+    summary: Str
+    description: Str
+    tags: [Str]
+    // The parameters this operation adds to its path item's.
+    //
+    // The specification MERGES the two lists, with an operation's entry
+    // overriding a path item's of the same name and location.
+    // `parameters_of` does that merge, and it is a function rather than
+    // a field because a caller that read this field alone would miss
+    // half the parameters on a well-written document.
+    parameters: [OapiParam]
+    request_body: ?OapiRequestBody
+    responses: [OapiResponse]
+    // An operation's own security, which REPLACES the document's rather
+    // than adding to it — and an empty list here is meaningful: it
+    // makes the operation public on a document that is otherwise
+    // authenticated. `security_of` carries that rule, which is why
+    // `has_own_security` exists to tell an empty override from an
+    // absent one.
+    security: [OapiSecurityReq]
+    has_own_security: Bool
+    deprecated: Bool
+
+// One path template, and the operations on it.
+pub struct OapiPathItem
+    // `/users/{id}`. The specification's own spelling, which is NOT
+    // router-nv's `:id` — `oapiroute.path_template` converts.
+    path_template: Str
+    summary: Str
+    description: Str
+    // Parameters shared by every operation on this path.
+    parameters: [OapiParam]
+    operations: [OapiOperation]
+
+// A tag, for grouping operations.
+pub struct OapiTag
+    name: Str
+    description: Str
+
+// The whole document.
+pub struct OapiDoc
+    // `"3.1.0"` or `"3.1.1"`. A string because it is one in the
+    // document and because a caller may want to emit exactly what it
+    // read.
+    openapi: Str
+    info: OapiInfo
+    // The base URL every path is relative to. An empty list means the
+    // specification's default — a server at `/` — which is a real
+    // answer and not a missing one.
+    servers: [OapiServer]
+    paths: [OapiPathItem]
+    // Operations that are not reachable at a path: callbacks and
+    // webhooks. New in 3.1, and modelled because a webhook-only
+    // document — one with no `paths` at all — is legal in 3.1 and was
+    // not in 3.0.
+    webhooks: [OapiPathItem]
+    components: OapiComponents
+    // Security that applies to every operation without its own.
+    security: [OapiSecurityReq]
+    tags: [OapiTag]
+    // `x-` keys, kept.
+    //
+    // Every gateway, generator and renderer carries what it needs in
+    // these, and a parser that dropped them would round-trip a document
+    // to something its owner does not recognise.
+    extensions: [(Str, JsonValueH)]
+
+// Why a document would not parse, or would not check.
+pub enum OapiError
+    // The JSON was not an object, or a required field was missing.
+    OapiMissingField(at: Str, field_name: Str)
+    // A field had the wrong JSON kind.
+    OapiWrongKind(at: Str, expected: Str, found: Str)
+    // `openapi` names a version this package does not implement. 3.0
+    // documents are refused rather than partly read: 3.0's schema
+    // object is JSON Schema draft-04 with its own extensions, and
+    // reading one as 3.1 gives wrong answers about nullability.
+    OapiUnsupportedVersion(found: Str)
+    // A `$ref` this document cannot resolve, and no registry supplied
+    // it either.
+    OapiUnresolvedRef(reference: Str)
+    // A local `$ref` pointing at something that is not there.
+    OapiDanglingRef(pointer: Str)
+    // A `$ref` cycle among the document's own components.
+    //
+    // A cycle through a SCHEMA is legal and ordinary — a tree node
+    // whose children are tree nodes — and schema-nv handles it. This
+    // is a cycle through a parameter, a response or a request body,
+    // which has no meaning and would not terminate.
+    OapiRefCycle(pointer: Str)
+    // A path template that is not one: no leading `/`, an unbalanced
+    // brace, or a `{}` with nothing in it.
+    OapiBadPathTemplate(path_template: Str, at: Int)
+    // A path template naming a parameter no operation declares, or an
+    // operation declaring a path parameter the template does not name.
+    OapiPathParamMismatch(path_template: Str, name: Str)
+    // Two operations sharing an `operationId`.
+    OapiDuplicateOperationId(operation_id: Str)
+    // A security requirement naming a scheme `components` does not
+    // define.
+    OapiUnknownSecurityScheme(name: Str)
+    // A schema that schema-nv refused to compile, with its own fault
+    // carried.
+    OapiBadSchema(at: Str, reason: Str)
+
+// The standard `Error` implementation, so a bad document is reported by
+// anything that reports errors.
+impl Error for OapiError
+    // The one-line report: what was wrong and WHERE, as a JSON Pointer
+    // into the document. The pointer rather than a line number, because
+    // a document that came out of a parser has no line numbers left and
+    // because a pointer is what the reader's own tooling understands.
+    fn message(self) -> Str
+        todo("openapi-nv.oapidoc.OapiError.message")
+
+// An empty document with a title and a version.
+//
+// ```novo
+// use oapidoc
+//
+// fn main() [io]
+//     let doc = oapidoc.document("Pet Store", "1.0.0")
+//     println(doc.info.title)
+// ```
+pub fn document(title: Str, version: Str) -> OapiDoc []
+    todo("openapi-nv.oapidoc.document")
+
+// The document with one more server.
+pub fn with_server(doc: OapiDoc, url: Str, description: Str) -> OapiDoc []
+    todo("openapi-nv.oapidoc.with_server")
+
+// The document with one more path item.
+pub fn with_path(doc: OapiDoc, item: OapiPathItem) -> OapiDoc []
+    todo("openapi-nv.oapidoc.with_path")
+
+// The document with one more named schema in `components`.
+pub fn with_component_schema(doc: OapiDoc, name: Str, schema: JsonValueH) -> OapiDoc []
+    todo("openapi-nv.oapidoc.with_component_schema")
+
+// The document with one more tag.
+pub fn with_tag(doc: OapiDoc, name: Str, description: Str) -> OapiDoc []
+    todo("openapi-nv.oapidoc.with_tag")
+
+// A path item with one operation on it.
+pub fn path_item(path_template: Str, op: OapiOperation) -> OapiPathItem []
+    todo("openapi-nv.oapidoc.path_item")
+
+// The path item with one more operation.
+pub fn with_operation(item: OapiPathItem, op: OapiOperation) -> OapiPathItem []
+    todo("openapi-nv.oapidoc.with_operation")
+
+// An operation with a method, an id and one response.
+//
+// One response rather than none, because a response is the only field
+// the specification makes mandatory and an operation built without one
+// is a document that will not check.
+pub fn operation(method: OapiMethod, operation_id: Str, ok: OapiResponse) -> OapiOperation []
+    todo("openapi-nv.oapidoc.operation")
+
+// A response with a status and the description the specification
+// requires.
+pub fn response(status: Str, description: Str) -> OapiResponse []
+    todo("openapi-nv.oapidoc.response")
+
+// The response with one more media type.
+pub fn with_content(r: OapiResponse, media_type: Str, schema: OapiSchemaRef) -> OapiResponse []
+    todo("openapi-nv.oapidoc.with_content")
+
+// A parameter, in a location, with a schema.
+pub fn parameter(name: Str, location: OapiParamIn, schema: OapiSchemaRef) -> OapiParam []
+    todo("openapi-nv.oapidoc.parameter")
+
+// ── Reading a document ───────────────────────────────────────────────
+
+// The operation at a method and a path template, if there is one.
+pub fn find_operation(doc: OapiDoc, method: OapiMethod, path_template: Str) -> ?OapiOperation []
+    todo("openapi-nv.oapidoc.find_operation")
+
+// Every operation in the document, with the path template it is on.
+//
+// The walk almost every consumer wants — a code generator, a linter, a
+// diff — and the one that is easy to write wrongly, because webhooks
+// are path items too and a walk over `paths` alone misses them.
+pub fn operations(doc: OapiDoc) -> [(Str, OapiOperation)] []
+    todo("openapi-nv.oapidoc.operations")
+
+// An operation's parameters, MERGED with its path item's.
+//
+// The specification merges the two lists, with an operation's entry
+// overriding a path item's of the same name and location. A function
+// rather than a field because a caller that read `op.parameters` alone
+// would miss half the parameters on a well-written document — which is
+// the single most common bug in OpenAPI tooling.
+pub fn parameters_of(item: OapiPathItem, op: OapiOperation) -> [OapiParam] []
+    todo("openapi-nv.oapidoc.parameters_of")
+
+// The security an operation actually requires.
+//
+// An operation's own list REPLACES the document's rather than adding to
+// it, and an empty own list is meaningful: it makes the operation
+// public on a document that is otherwise authenticated. That is why
+// `has_own_security` exists — without it an empty override and an
+// absent one are the same value, and the difference is whether an
+// endpoint needs a token.
+pub fn security_of(doc: OapiDoc, op: OapiOperation) -> [OapiSecurityReq] []
+    todo("openapi-nv.oapidoc.security_of")
+
+// The parameter names a path template declares, in order.
+//
+// `["id"]` for `/users/{id}`. What `check` compares an operation's path
+// parameters against.
+pub fn template_params(path_template: Str) -> [Str] []
+    todo("openapi-nv.oapidoc.template_params")
+
+// Every `$ref` in the document that names another document.
+//
+// **The load-bearing call of the layer.** A `$ref` to a URI means
+// reading, and a `core` package may not read. So the core says what it
+// needs and the host performs:
+//
+//   let wanted = oapidoc.external_refs(doc)
+//   ... the host reads each one, however it likes ...
+//   let reg = schcompile.with_document(reg, uri, fetched)
+//   let compiled = oapivalid.compile(doc, reg)
+//
+// A document from outside therefore cannot make a program fetch a URL.
+pub fn external_refs(doc: OapiDoc) -> [Str] []
+    todo("openapi-nv.oapidoc.external_refs")
+
+// Every local `$ref` that points at nothing in this document.
+pub fn dangling_refs(doc: OapiDoc) -> [Str] []
+    todo("openapi-nv.oapidoc.dangling_refs")
+
+// A local `$ref` resolved to the schema it names.
+pub fn resolve_local(doc: OapiDoc, pointer: Str) -> ?JsonValueH []
+    todo("openapi-nv.oapidoc.resolve_local")
+
+// Everything wrong with the document that is not a parse error.
+//
+// Every problem rather than the first, because a document with six
+// mistakes should tell its author about six. The list is the one
+// `OapiError` names: a path template and its parameters disagreeing, a
+// duplicated `operationId`, a security requirement naming a scheme
+// nobody defined, a licence with both an identifier and a URL.
+pub fn check(doc: OapiDoc) -> [OapiError] []
+    todo("openapi-nv.oapidoc.check")
+
+// The method's name as a document spells it: lowercase.
+pub fn method_name(m: OapiMethod) -> Str []
+    todo("openapi-nv.oapidoc.method_name")
+
+// The method a name spells, or `None`.
+//
+// Compared case-insensitively on the way in, because a document is
+// written by hand and `GET` appears in one about as often as `get`.
+pub fn method_named(name: Str) -> ?OapiMethod []
+    todo("openapi-nv.oapidoc.method_named")
+
+// The location's name as a document spells it.
+pub fn param_in_name(location: OapiParamIn) -> Str []
+    todo("openapi-nv.oapidoc.param_in_name")
+
+// The default `style` for a location, per the specification.
+//
+// `form` for query and cookie, `simple` for path and header. Published
+// because the default is not the same everywhere and a caller building
+// a parameter by hand will use the wrong one.
+pub fn default_style(location: OapiParamIn) -> OapiStyle []
+    todo("openapi-nv.oapidoc.default_style")
+
+// The default `explode` for a style, per the specification.
+//
+// `true` for `form`, `false` for everything else — which is why
+// `?tags=a&tags=b` is the default query spelling and `?tags=a,b` needs
+// `explode: false` said out loud.
+pub fn default_explode(style: OapiStyle) -> Bool []
+    todo("openapi-nv.oapidoc.default_explode")

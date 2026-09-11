@@ -1,0 +1,120 @@
+// oapijson.nv — a document to and from the standard library's JSON.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// **YAML IS NOT THIS PACKAGE'S JOB, AND SAYING SO IS THE POINT.**  Most
+// OpenAPI documents in the world are YAML, and a reader will look here
+// for `from_yaml` first.  It is not here, and the reason is that YAML
+// and JSON are the same data model: `yaml-nv` parses YAML into the same
+// `JsonValueH` this module reads, so the composition is
+//
+//   let value = yaml.parse(text)        // yaml-nv's job
+//   let doc   = oapijson.from_json(value)   // this package's
+//
+// and a `from_yaml` here would be a dependency on a YAML parser that
+// every JSON caller would pay for.  The specification agrees: it says a
+// document may be written in either format and defines its semantics
+// over the shared model.
+//
+// PARSING IS STRICT, AND 3.0 IS REFUSED RATHER THAN PARTLY READ.  A
+// 3.0 document's schema object is JSON Schema draft-04 with OpenAPI's
+// own extensions — `nullable: true` rather than `type: ["string",
+// "null"]`, `exclusiveMinimum` as a boolean rather than a number — and
+// reading one as 3.1 gives WRONG answers about what a field accepts
+// rather than no answer.  A converter is a real tool and it is not this
+// one.
+//
+// RENDERING IS CANONICAL AND LOSSLESS IN THE DIRECTION THAT MATTERS.
+// `from_json(to_json(doc))` is `doc`.  The other direction is NOT an
+// identity — key order settles, an absent field that has a default is
+// written or omitted by one rule, and whitespace is gone — and that is
+// what a caller re-emitting a document wants, because two equal
+// documents should render equal.  What is NOT lost is the `x-`
+// extensions: a document that carried a gateway's own keys renders with
+// them, in the order they arrived.
+
+use std.json
+use oapidoc
+
+// Render a document to a JSON value.
+//
+// ```novo
+// use oapidoc
+// use oapijson
+//
+// fn main() [io]
+//     let doc = oapidoc.document("Pet Store", "1.0.0")
+//     println(json.stringify(oapijson.to_json(doc)))
+// ```
+pub fn to_json(doc: oapidoc.OapiDoc) -> JsonValueH []
+    todo("openapi-nv.oapijson.to_json")
+
+// Render a document to compact JSON text.
+pub fn to_json_text(doc: oapidoc.OapiDoc) -> Str []
+    todo("openapi-nv.oapijson.to_json_text")
+
+// Render a document to indented JSON text.
+//
+// Separate from `to_json_text` rather than a flag, because the two have
+// different callers: one is writing a file a person will read and edit,
+// the other is writing a response body.
+pub fn to_json_pretty(doc: oapidoc.OapiDoc) -> Str []
+    todo("openapi-nv.oapijson.to_json_pretty")
+
+// Read a document out of a JSON value.
+//
+// Strict: a field of the wrong kind is an error rather than a default,
+// because a document whose `paths` is a list instead of an object is a
+// document somebody generated wrongly and silently reading it as empty
+// would hide that.
+pub fn from_json(value: JsonValueH) -> Result<oapidoc.OapiDoc, oapidoc.OapiError> []
+    todo("openapi-nv.oapijson.from_json")
+
+// Read a document out of JSON text.
+pub fn from_json_text(text: Str) -> Result<oapidoc.OapiDoc, oapidoc.OapiError> []
+    todo("openapi-nv.oapijson.from_json_text")
+
+// Read a document, collecting everything wrong rather than stopping.
+//
+// The form a linter wants: a document that is structurally readable
+// comes back with every complaint beside it, so an author fixes six
+// things in one pass. `None` for a value that was not an object at all,
+// which is the one failure there is nothing to collect from.
+pub fn from_json_lenient(value: JsonValueH) -> ?(oapidoc.OapiDoc, [oapidoc.OapiError]) []
+    todo("openapi-nv.oapijson.from_json_lenient")
+
+// Whether a JSON value looks like an OpenAPI document at all.
+//
+// An object with an `openapi` string in it. The cheap check a caller
+// makes before parsing a file it found on disk, so that "this is not an
+// OpenAPI document" and "this OpenAPI document is wrong" are different
+// answers.
+pub fn looks_like_document(value: JsonValueH) -> Bool []
+    todo("openapi-nv.oapijson.looks_like_document")
+
+// The `openapi` version string a value declares, or `""`.
+//
+// Published so a caller can tell a 3.0 document from a 3.1 one before
+// `from_json` refuses it, and say something better than "unsupported".
+pub fn declared_version(value: JsonValueH) -> Str []
+    todo("openapi-nv.oapijson.declared_version")
+
+// The versions this package reads.
+//
+// `["3.1.0", "3.1.1"]`. A function rather than prose so that a caller
+// checking compatibility reads the same list the parser enforces.
+pub fn supported_versions() -> [Str] []
+    todo("openapi-nv.oapijson.supported_versions")
+
+// One schema reference rendered as the JSON it is in a document.
+//
+// `{"$ref": "#/components/schemas/Pet"}` for a local reference, the
+// inline schema itself for an inline one, and an empty object for
+// `OapiSchemaAbsent` — which is the specification's own spelling for
+// "constrains nothing".
+pub fn schema_ref_json(r: oapidoc.OapiSchemaRef) -> JsonValueH []
+    todo("openapi-nv.oapijson.schema_ref_json")
+
+// A schema reference read out of the JSON at a schema position.
+pub fn schema_ref_of(value: JsonValueH) -> oapidoc.OapiSchemaRef []
+    todo("openapi-nv.oapijson.schema_ref_of")

@@ -1,0 +1,243 @@
+// oapivalid.nv — a request against its operation, as arithmetic.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// **VALIDATION CANNOT FAIL, AND THAT IS THE DESIGN.**
+// `validate_request` answers a list and never a `Result`.  A request
+// that does not match its operation is THE ANSWER — it is a 400 with a
+// body naming what was wrong — and modelling it as an error would make
+// the ordinary case travel the failure path.  Everything that can
+// genuinely be wrong is wrong in the DOCUMENT, and `compile` is where
+// that is said: a `$ref` that does not resolve, a schema schema-nv
+// refuses, a path template whose parameters an operation does not
+// declare.  schema-nv makes the same split for the same reason, and the
+// two halves compose because of it.
+//
+// COMPILE ONCE, VALIDATE MANY.  `compile` resolves every `$ref` and
+// hands every schema to `schcompile.compile_with`, once, at start-up.
+// An `OapiCompiled` is then a value a service keeps and uses a million
+// times.  A validator that walked the document per request would parse
+// the same schemas on every call, which is the shape that makes people
+// turn validation off in production.
+//
+// EVERY FAILURE NAMES THREE PLACES.  Where in the REQUEST (which
+// parameter, which header, which pointer into the body), where in the
+// DOCUMENT (a JSON Pointer), and what was expected.  All of them rather
+// than the first, because a form with six bad fields should tell a
+// person about six and an agent should be told everything wrong with
+// its tool call — which is the same argument schema-nv makes and the
+// reason both answer lists.
+//
+// WHAT THIS DOES NOT DO, AND WHY EACH IS SOMEBODY ELSE'S.  It does not
+// authenticate: a security requirement is checked for PRESENCE — is
+// there an `Authorization` header at all — and never for validity,
+// because validating a bearer token means knowing a key and this
+// package has none.  It does not decode a body: `body` arrives as a
+// `JsonValueH` the caller parsed, so a request whose body is not JSON
+// at all is the caller's own 415 and never reaches here.  And it does
+// not negotiate: matching `Content-Type` against the operation's media
+// types is essence-and-wildcard comparison, which mime-nv owns — the
+// README names it as the dependency this package would take if the two
+// ever need to agree about a `+json` suffix.
+
+use std.json
+use oapidoc
+use schcompile
+
+// A document with every schema compiled: a value a service keeps.
+pub struct OapiCompiled
+    // How many operations were compiled. What a service asserts at
+    // start-up: a document that compiled zero operations is one that
+    // parsed and describes nothing.
+    operation_count: Int
+    // How many distinct schemas were compiled, after `$ref`s were
+    // resolved and shared ones collapsed.
+    schema_count: Int
+    // Whether any schema in the document uses a `format` that
+    // schema-nv treats as an annotation rather than an assertion.
+    //
+    // Published because it is the one place a reader's expectation and
+    // the implementation differ quietly: a document declaring
+    // `format: email` is describing, not constraining, unless the
+    // caller asked schema-nv to assert formats — and a service that
+    // believed otherwise has an input validator that validates nothing.
+    has_annotation_formats: Bool
+
+// Where in a request a failure was found.
+pub enum OapiFailureIn
+    // A path parameter.
+    OapiFailPath
+    // A query parameter.
+    OapiFailQuery
+    // A request header.
+    OapiFailHeader
+    // A cookie.
+    OapiFailCookie
+    // The request body.
+    OapiFailBody
+    // The request itself: no operation matched, or the method is not
+    // one this path describes.
+    OapiFailRequest
+    // A response, for `validate_response`.
+    OapiFailResponse
+
+// One thing wrong with a request.
+pub struct OapiFailure
+    location: OapiFailureIn
+    // The parameter or header name, or `""` for a body failure.
+    name: Str
+    // Where in the instance: a JSON Pointer into the body, or `""` for
+    // a parameter.
+    //
+    // A pointer rather than a path expression, because RFC 6901 is what
+    // schema-nv answers and what a client's own tooling reads.
+    instance_location: Str
+    // Where in the DOCUMENT the rule came from, as a JSON Pointer.
+    //
+    // The field that turns a rejection into something an API's author
+    // can act on: "your request is wrong" is a complaint, "`/paths/
+    // ~1users/post/requestBody/content/application~1json/schema/
+    // properties/age/minimum` says 0" is a conversation.
+    schema_location: Str
+    // What was expected, in one line.
+    message: Str
+
+// Compile a document: resolve every `$ref`, compile every schema.
+//
+// `registry` carries the external documents the host fetched for
+// `oapidoc.external_refs`. A document with no external references
+// compiles against `schcompile.registry()` — an empty one — and that is
+// the ordinary case.
+//
+// This is where everything that can genuinely be wrong is wrong, which
+// is why it is the only function here that answers a `Result`.
+//
+// ```novo
+// use oapidoc
+// use oapivalid
+// use schcompile
+//
+// fn main() [io]
+//     let doc = oapidoc.document("Pet Store", "1.0.0")
+//     match oapivalid.compile(doc, schcompile.registry())
+//         Ok(c)  => println(string_of_int(c.operation_count))
+//         Err(_) => println("the document is wrong")
+// ```
+pub fn compile(doc: oapidoc.OapiDoc,
+               registry: schcompile.SchRegistry) -> Result<OapiCompiled, oapidoc.OapiError> []
+    todo("openapi-nv.oapivalid.compile")
+
+// Everything wrong with a request, against the operation it reaches.
+//
+// **Cannot fail.** An empty list is a request that matches; a non-empty
+// one is a 400 whose body is the list.
+//
+// `path` is the request's path as it arrived — this matches it against
+// the document's templates itself, because a caller that had already
+// routed it would have to tell this function which operation it landed
+// on and the two could disagree. `headers` are name/value pairs as they
+// arrived, compared case-insensitively. `body` is the parsed JSON body,
+// or `json.null()` for a request that has none.
+pub fn validate_request(c: OapiCompiled, method: Str, path: Str, headers: [(Str, Str)],
+                        body: JsonValueH) -> [OapiFailure] []
+    todo("openapi-nv.oapivalid.validate_request")
+
+// The same, with the query string supplied separately.
+//
+// For a caller that has already split the target — which is every
+// caller with a URL parser — so that this function does not have to
+// split it again and the two cannot disagree about where the path ends.
+pub fn validate_request_parts(c: OapiCompiled, method: Str, path: Str, query: Str,
+                              headers: [(Str, Str)], body: JsonValueH) -> [OapiFailure] []
+    todo("openapi-nv.oapivalid.validate_request_parts")
+
+// Everything wrong with a RESPONSE, against the operation it answers.
+//
+// The direction most validators skip, and the one that catches the
+// bugs: a service whose response does not match its own document is a
+// service whose clients will break, and nobody notices until a
+// generated client does. Right in a test suite and in a staging
+// environment; the README says why it is the wrong thing to run in
+// production, which is that a service must not 500 because its
+// description is stale.
+pub fn validate_response(c: OapiCompiled, method: Str, path: Str, status: Int,
+                         headers: [(Str, Str)], body: JsonValueH) -> [OapiFailure] []
+    todo("openapi-nv.oapivalid.validate_response")
+
+// Which operation a request path and method reach, as a JSON Pointer
+// into the document.
+//
+// `None` for a path no template matches. Published because "no
+// operation matched" is a different answer from "the request was
+// wrong", and a service logging the two together cannot tell a bad
+// client from a missing description.
+pub fn operation_pointer(c: OapiCompiled, method: Str, path: Str) -> ?Str []
+    todo("openapi-nv.oapivalid.operation_pointer")
+
+// Whether a request carries something for every security requirement
+// the operation has.
+//
+// PRESENCE ONLY, and the name says so. An `Authorization` header that
+// is there is a requirement satisfied as far as a document can tell;
+// whether the token in it is valid needs a key, and this package has
+// none and should not. A service that took this for authentication
+// would have an authorisation check that any client passes by sending
+// a header.
+pub fn security_present(c: OapiCompiled, method: Str, path: Str, headers: [(Str, Str)]) -> Bool []
+    todo("openapi-nv.oapivalid.security_present")
+
+// Which media type of the operation's request body a `Content-Type`
+// selects, or `""`.
+//
+// Matched by essence and with wildcards — `application/json` against
+// `application/json`, then `application/*`, then `*/*` — which is the
+// same rule an `Accept` header follows. mime-nv owns that comparison
+// properly; this is the subset a document needs, and the README names
+// the dependency this package would take if the two ever have to agree
+// about a `+json` suffix.
+pub fn content_type_for(c: OapiCompiled, method: Str, path: Str, content_type: Str) -> Str []
+    todo("openapi-nv.oapivalid.content_type_for")
+
+// Only the failures from one location.
+//
+// So a service can answer a 400 for a bad body and a 422 for a bad
+// query parameter, which some APIs distinguish and this package should
+// not decide for them.
+pub fn failures_in(fs: [OapiFailure], location: OapiFailureIn) -> [OapiFailure] []
+    todo("openapi-nv.oapivalid.failures_in")
+
+// The failures as a JSON value a service can send.
+//
+// RFC 9457's `problem+json` shape, with the failures as its `errors`
+// member. Here rather than left to the caller because every service
+// that validates requests has to answer them, and a shape a client can
+// rely on across services is worth more than each one inventing its
+// own.
+pub fn failures_json(fs: [OapiFailure]) -> JsonValueH []
+    todo("openapi-nv.oapivalid.failures_json")
+
+// One failure's one-line report.
+pub fn failure_text(f: OapiFailure) -> Str []
+    todo("openapi-nv.oapivalid.failure_text")
+
+// The location's name, for a log line and for `failures_json`.
+pub fn failure_in_name(location: OapiFailureIn) -> Str []
+    todo("openapi-nv.oapivalid.failure_in_name")
+
+// A parameter's value decoded from its serialisation style.
+//
+// The half of validation that is not schema work: `?tags=a,b` and
+// `?tags=a&tags=b` are the same parameter under different
+// `style`/`explode` combinations, and turning either into the JSON
+// value a schema validates against is this function. Published because
+// a caller building a request needs the same rules in reverse and two
+// implementations of them would disagree.
+pub fn decode_param(p: oapidoc.OapiParam, raw: [Str]) -> ?JsonValueH []
+    todo("openapi-nv.oapivalid.decode_param")
+
+// A parameter's value encoded into its serialisation style.
+//
+// The reverse, for a client. Answers the raw values a request should
+// carry — a list because an exploded parameter is several.
+pub fn encode_param(p: oapidoc.OapiParam, value: JsonValueH) -> [Str] []
+    todo("openapi-nv.oapivalid.encode_param")

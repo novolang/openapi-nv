@@ -1,0 +1,195 @@
+// oapiroute.nv — the paths object, derived from the route table.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A ROUTE TABLE AND A PATHS OBJECT ARE THE SAME FACTS WRITTEN TWICE,
+// and the copy that is not executed is the one that goes stale.  A
+// service adds an endpoint, nobody updates the description, and six
+// months later the description is a document about a service that no
+// longer exists — which is the normal condition of hand-maintained API
+// documentation and the reason this module is here.
+//
+// `from_routes` DERIVES, and `drift` CHECKS.  Deriving is right for a
+// service whose document is generated at build time; checking is right
+// for one whose document is hand-written and reviewed, which is most
+// services with a public API, because a generated description has no
+// prose in it.  Both read the same table, so a service can start with
+// the second and move to the first.
+//
+// THE TWO SPELLINGS ARE DIFFERENT, AND THE CONVERSION IS NOT TOTAL.
+// router-nv writes `/users/:id` and OpenAPI writes `/users/{id}`, which
+// is a substitution.  A CATCH-ALL HAS NO SPELLING AT ALL: OpenAPI 3.1
+// has no wildcard path templating, and the nearest approximation — a
+// path parameter whose value contains slashes — is rejected by most
+// tools and ambiguous in the rest.  So `path_template` REFUSES a
+// catch-all rather than emitting something that looks right, and
+// `from_routes` reports it as `OapiRouteCatchAll` with the route named.
+// A service that serves files under `/files/*rest` describes that
+// endpoint by hand or not at all, and being told so by a refusal is
+// better than finding out from a client generator.
+//
+// WHAT IS DERIVED AND WHAT IS NOT.  A route table knows the path, the
+// parameters and the methods.  It does not know what an operation
+// RETURNS, what it accepts, what it is called or what it is for — so
+// `OapiRouteMeta` is where the caller supplies those, keyed by the
+// route id it already dispatches on.  A derived document with no meta
+// at all is a valid document whose every operation has one `default`
+// response and no description: useless to a reader, and exactly right
+// as the thing `drift` compares against.
+
+use oapidoc
+use routepat
+use routetree
+
+// What the route table cannot know about an operation.
+//
+// Keyed by the route id the caller already dispatches on, so the meta
+// lives beside the handler rather than in a second table that can fall
+// out of step with the first.
+pub struct OapiRouteMeta
+    route_id: Int
+    // Which method this meta describes. A route may answer several, and
+    // a `GET` and a `DELETE` on one path are different operations with
+    // different responses.
+    method: oapidoc.OapiMethod
+    operation_id: Str
+    summary: Str
+    description: Str
+    tags: [Str]
+    request_body: ?oapidoc.OapiRequestBody
+    responses: [oapidoc.OapiResponse]
+    // The schema for each path or query parameter, by name. A route
+    // table knows a parameter EXISTS and nothing about its type.
+    param_schemas: [(Str, oapidoc.OapiSchemaRef)]
+    deprecated: Bool
+
+// Why a route could not be described.
+pub enum OapiRouteProblem
+    // The route ends in a catch-all, which OpenAPI 3.1 cannot spell.
+    //
+    // Not an approximation: a path parameter whose value contains
+    // slashes is rejected by most tools and read differently by the
+    // rest, so emitting one would produce a document that generates
+    // clients which do not work.
+    OapiRouteCatchAll(pattern: Str, route_id: Int)
+    // The route has no meta, so its operations have no responses and no
+    // description. Reported rather than refused: a document of
+    // undescribed operations is what `drift` compares against, and it
+    // is a useful intermediate state for a service adding descriptions
+    // one endpoint at a time.
+    OapiRouteNoMeta(pattern: Str, route_id: Int)
+    // The route answers a method OpenAPI's Path Item Object does not
+    // name — a WebDAV verb, a private one.
+    OapiRouteOddMethod(pattern: Str, method_name: Str)
+    // Two routes produce the same path template. Legal in a router and
+    // not in a document: an OpenAPI `paths` object is keyed by
+    // template, so the second would overwrite the first.
+    OapiRouteTemplateClash(path_template: Str, first_id: Int, second_id: Int)
+
+// What a document and a route table disagree about.
+pub enum OapiDrift
+    // The table has a route the document does not describe. The common
+    // direction, and the one that matters: an endpoint nobody
+    // documented is an endpoint nobody reviewed.
+    OapiDriftUndocumented(path_template: Str, method_name: Str)
+    // The document describes an operation the table cannot reach. Dead
+    // documentation, which sends a client to a 404.
+    OapiDriftUnreachable(path_template: Str, method_name: Str)
+    // Both have the path, and the methods differ.
+    OapiDriftMethods(path_template: Str, in_table: Str, in_document: Str)
+    // Both have the operation, and the path parameters differ.
+    OapiDriftParams(path_template: Str, method_name: Str, name: Str)
+    // A route the comparison could not make, because OpenAPI cannot
+    // spell it.
+    OapiDriftUnspellable(pattern: Str)
+
+// The OpenAPI spelling of a router-nv pattern.
+//
+// `/users/:id` becomes `/users/{id}`. Answers `None` for a pattern
+// ending in a catch-all, because OpenAPI 3.1 has no wildcard path
+// templating and there is no honest conversion.
+//
+// ```novo
+// use oapiroute
+//
+// fn main() [io]
+//     match oapiroute.path_template("/users/:id")
+//         Some(t) => println(t)
+//         None    => println("no OpenAPI spelling")
+// ```
+pub fn path_template(pattern: Str) -> ?Str []
+    todo("openapi-nv.oapiroute.path_template")
+
+// The router-nv spelling of an OpenAPI path template.
+//
+// `/users/{id}` becomes `/users/:id`. The other direction, for a
+// service that has a document and wants a route table from it —
+// a mock server, a contract test — and for `drift`, which compares in
+// whichever direction has fewer conversions.
+pub fn route_pattern(path_template: Str) -> Str []
+    todo("openapi-nv.oapiroute.route_pattern")
+
+// A document derived from a route table and the caller's meta.
+//
+// Every route becomes a path item, every method on it becomes an
+// operation, and every `:param` becomes a required path parameter.
+// Answers the document AND everything the derivation could not do, so a
+// caller sees both — a build that failed to describe two endpoints
+// should say which two rather than producing a document that is quietly
+// short.
+pub fn from_routes(t: routetree.RouteTree, title: Str, version: Str,
+                   metas: [OapiRouteMeta]) -> (oapidoc.OapiDoc, [OapiRouteProblem]) []
+    todo("openapi-nv.oapiroute.from_routes")
+
+// The path items a route table implies, without a whole document.
+//
+// For a caller merging derived paths into a hand-written document,
+// which is the arrangement a service with prose in its description
+// wants: the prose is written once and the paths come from the table
+// every build.
+pub fn path_items(t: routetree.RouteTree,
+                  metas: [OapiRouteMeta]) -> ([oapidoc.OapiPathItem], [OapiRouteProblem]) []
+    todo("openapi-nv.oapiroute.path_items")
+
+// What a document and a route table disagree about.
+//
+// **The question a CI job asks**: does this document still describe
+// this service? Every disagreement rather than the first, because a
+// service that added three endpoints should be told about three.
+//
+// An empty answer is the thing worth having: it means the description
+// and the code say the same thing, checked by a machine rather than by
+// a reviewer remembering.
+pub fn drift(doc: oapidoc.OapiDoc, t: routetree.RouteTree) -> [OapiDrift] []
+    todo("openapi-nv.oapiroute.drift")
+
+// A route table built from a document.
+//
+// The reverse direction, for a mock server and for a contract test that
+// wants to route a recorded request the way the document says it should
+// go. Answers the table and the templates that could not be converted.
+pub fn to_routes(doc: oapidoc.OapiDoc,
+                 policy: routepat.RoutePolicy) -> (routetree.RouteTree, [Str]) []
+    todo("openapi-nv.oapiroute.to_routes")
+
+// Meta for a route with nothing filled in but the method.
+//
+// What `from_routes` uses for a route the caller gave no meta for, and
+// the starting point for one that is about to. Its one response is a
+// `default` with an empty description, which is the minimum a document
+// checks with.
+pub fn empty_meta(route_id: Int, method: oapidoc.OapiMethod) -> OapiRouteMeta []
+    todo("openapi-nv.oapiroute.empty_meta")
+
+// The meta for a route id and method, or `None`.
+pub fn find_meta(metas: [OapiRouteMeta], route_id: Int,
+                 method: oapidoc.OapiMethod) -> ?OapiRouteMeta []
+    todo("openapi-nv.oapiroute.find_meta")
+
+// Whether a router-nv pattern has an OpenAPI spelling at all.
+//
+// False for a catch-all. Published so a caller can check a pattern
+// where it is registered rather than at the build that tried to
+// describe it.
+pub fn is_describable(pattern: Str) -> Bool []
+    todo("openapi-nv.oapiroute.is_describable")

@@ -1,0 +1,201 @@
+// oapidiff.nv — what changed between two documents, and whether it
+// breaks a client.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A DIFF OF THE DOCUMENTS IS NOT A DIFF OF THE FILES.  `git diff` on
+// two OpenAPI files reports a reordered `paths` object as a hundred
+// changed lines and a `required: true` added to a request body as one —
+// and the second is the one that breaks every client.  This module
+// compares the MEANING: operations added, operations removed, and the
+// named ways an operation can change.
+//
+// **BREAKING IS ASYMMETRIC, AND THAT IS THE WHOLE OF IT.**  A change is
+// breaking for a CLIENT when the service will now refuse something it
+// used to accept, or stop sending something a client relied on
+// receiving.  The asymmetry runs the opposite way on the two sides of a
+// call, and a diff tool that got it backwards would bless exactly the
+// changes that cause an outage:
+//
+//   a new REQUIRED request field     breaking — old clients omit it
+//   a new OPTIONAL request field     safe
+//   a request field made optional    safe
+//   a request field REMOVED          safe for the service, and a
+//                                    warning: a client still sending it
+//                                    will get it ignored rather than
+//                                    rejected, which is silent
+//   a new RESPONSE field             safe — clients ignore what they do
+//                                    not know
+//   a response field REMOVED         breaking — a client read it
+//   a response field made optional   breaking, for the same reason
+//   an enum value ADDED to a request safe
+//   an enum value ADDED to a response  breaking — a client matched on
+//                                    the old set
+//   an enum value REMOVED            the mirror of each of those
+//
+// So `is_breaking` takes the direction into account, and a change that
+// is safe in a request and breaking in a response is two different
+// answers from one function rather than a caller's own judgement.
+//
+// WHAT A DIFF CANNOT SEE, said plainly: a schema's MEANING.  Two
+// schemas that are structurally different can describe the same set of
+// values — `type: ["string", "null"]` and an `anyOf` of the two — and
+// deciding that is subtyping, which is undecidable in general for JSON
+// Schema.  So a schema change is reported as a change, with both
+// schemas carried, and `is_breaking` answers `true` for it: the safe
+// direction for a tool that gates a release, and a human overrules it.
+
+use oapidoc
+
+// Whether a change is being judged from a client's side or a server's.
+//
+// The same edit is breaking in one direction and safe in the other, and
+// a diff that did not ask would be answering the wrong question half
+// the time. A public API cares about `OapiForClients`; a service
+// consuming another service's API cares about `OapiForServers`.
+pub enum OapiAudience
+    // The people calling this API. A new required request field breaks
+    // them; a removed response field breaks them.
+    OapiForClients
+    // The people implementing it, on a document somebody else owns. A
+    // new required RESPONSE field breaks them.
+    OapiForServers
+
+// One difference between two documents.
+pub enum OapiChange
+    // An operation that is in the new document and not the old.
+    OapiOpAdded(path_template: Str, method_name: Str)
+    // An operation that is gone.
+    OapiOpRemoved(path_template: Str, method_name: Str)
+    // An operation marked deprecated that was not.
+    //
+    // Not breaking, and worth its own variant: it is the only signal a
+    // client gets before a removal, and a changelog that buried it
+    // among schema edits would waste it.
+    OapiOpDeprecated(path_template: Str, method_name: Str)
+    // An operation's `operationId` changed.
+    //
+    // Breaking for anybody with a generated client, because the method
+    // they call is named after it — and invisible in a rendered
+    // document, which is why it is a variant rather than a schema
+    // change.
+    OapiOpIdChanged(path_template: Str, method_name: Str, old_id: Str, new_id: Str)
+    // A parameter that is new.
+    OapiParamAdded(path_template: Str, method_name: Str, name: Str, required: Bool)
+    // A parameter that is gone.
+    OapiParamRemoved(path_template: Str, method_name: Str, name: Str)
+    // A parameter that became required, or stopped being.
+    OapiParamRequiredChanged(path_template: Str, method_name: Str, name: Str, now_required: Bool)
+    // A parameter's schema changed.
+    OapiParamSchemaChanged(path_template: Str, method_name: Str, name: Str, old_schema: JsonValueH,
+                           new_schema: JsonValueH)
+    // A request body that is new, or gone, or changed its required
+    // flag.
+    OapiBodyChanged(path_template: Str, method_name: Str, was_required: Bool, now_required: Bool)
+    // A media type added to or removed from a request body or a
+    // response.
+    OapiMediaTypeChanged(path_template: Str, method_name: Str, media_type: Str, added: Bool)
+    // A response status that is new, or gone.
+    OapiResponseChanged(path_template: Str, method_name: Str, status: Str, added: Bool)
+    // A schema somewhere changed, with both carried.
+    //
+    // The catch-all, and the one a tool should not try to be clever
+    // about: deciding whether two schemas describe the same values is
+    // subtyping, which is undecidable in general for JSON Schema.
+    OapiSchemaChanged(at: Str, old_schema: JsonValueH, new_schema: JsonValueH)
+    // A security requirement added to or removed from an operation.
+    //
+    // Adding one is breaking for every client that was not sending a
+    // token; removing one is not breaking and IS worth a loud line in a
+    // changelog, because an endpoint that stopped requiring
+    // authentication is either a decision or an accident.
+    OapiSecurityChanged(path_template: Str, method_name: Str, added: Bool)
+    // A server URL added or removed.
+    OapiServerChanged(url: Str, added: Bool)
+    // The API's own `info.version` changed.
+    //
+    // Reported so that a tool can check the obvious thing: a document
+    // with breaking changes whose version did not move is a release
+    // somebody is about to regret.
+    OapiVersionChanged(old_version: Str, new_version: Str)
+
+// Every difference between two documents.
+//
+// In a stable order — by path template, then by method, then by the
+// variant order above — so that two runs over the same pair produce the
+// same list and a diff of diffs is meaningful.
+//
+// ```novo
+// use oapidiff
+// use oapidoc
+// use std.list
+//
+// fn main() [io]
+//     let a = oapidoc.document("Pet Store", "1.0.0")
+//     let b = oapidoc.document("Pet Store", "1.1.0")
+//     println(string_of_int(list.len(oapidiff.diff(a, b))))
+// ```
+pub fn diff(old_doc: oapidoc.OapiDoc, new_doc: oapidoc.OapiDoc) -> [OapiChange] []
+    todo("openapi-nv.oapidiff.diff")
+
+// Whether one change breaks somebody, for an audience.
+//
+// The asymmetry is the whole of this function: a new required REQUEST
+// field breaks clients and not servers, and a removed RESPONSE field
+// breaks clients and not servers, and both are the other way round for
+// `OapiForServers`.
+pub fn is_breaking(c: OapiChange, audience: OapiAudience) -> Bool []
+    todo("openapi-nv.oapidiff.is_breaking")
+
+// Only the breaking changes.
+//
+// What a release gate reads. An empty answer is the property worth
+// having: this version accepts everything the last one did and still
+// sends everything it sent.
+pub fn breaking(cs: [OapiChange], audience: OapiAudience) -> [OapiChange] []
+    todo("openapi-nv.oapidiff.breaking")
+
+// Whether the two documents are compatible for an audience.
+pub fn is_compatible(old_doc: oapidoc.OapiDoc, new_doc: oapidoc.OapiDoc,
+                     audience: OapiAudience) -> Bool []
+    todo("openapi-nv.oapidiff.is_compatible")
+
+// One change's one-line report.
+//
+// The line a changelog carries, and the line a failing release gate
+// prints: what changed, where, and whether it breaks.
+pub fn change_text(c: OapiChange) -> Str []
+    todo("openapi-nv.oapidiff.change_text")
+
+// Where a change is, as a JSON Pointer into the new document.
+//
+// `""` for a change with no place in the new document — a removed
+// operation. Published so a tool can link a changelog line to the
+// document it is about.
+pub fn change_pointer(c: OapiChange) -> Str []
+    todo("openapi-nv.oapidiff.change_pointer")
+
+// The changes as a JSON value, for a tool that reports them.
+pub fn changes_json(cs: [OapiChange], audience: OapiAudience) -> JsonValueH []
+    todo("openapi-nv.oapidiff.changes_json")
+
+// The semantic version bump a set of changes implies.
+//
+// `"major"` for anything breaking, `"minor"` for an addition, `"patch"`
+// for a document that changed only its prose. A suggestion and not a
+// rule — a service may have reasons — and it is published because
+// deriving it by hand from forty changes is where the mistake gets
+// made.
+pub fn suggested_bump(cs: [OapiChange], audience: OapiAudience) -> Str []
+    todo("openapi-nv.oapidiff.suggested_bump")
+
+// Whether two schemas are the same document.
+//
+// Structural equality over the JSON, not semantic: `{"type":"string"}`
+// and `{"anyOf":[{"type":"string"}]}` describe the same values and are
+// not the same document. Published because a caller writing its own
+// rule about a schema change needs the same comparison `diff` makes,
+// and because saying it out loud is the honest form of the limitation
+// the module header names.
+pub fn schema_eq(a: JsonValueH, b: JsonValueH) -> Bool []
+    todo("openapi-nv.oapidiff.schema_eq")

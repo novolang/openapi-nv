@@ -1,0 +1,264 @@
+// oapidoc_tests.nv — the document as a value, and reading it back out
+// of JSON.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: openapi-nv.<module>.<fn>`.
+//
+// THE CASES ARE THE ONES OPENAPI TOOLING GETS WRONG.  A path item's
+// parameters merging into an operation's; an empty `security` on an
+// operation meaning public rather than absent; a 3.0 document read as
+// 3.1; the `x-` keys a gateway needs surviving a round trip.  Each is a
+// place two well-known tools disagree about what a document says, and
+// each is one comparison.
+
+use std.test
+use std.list
+use std.json
+use oapidoc
+use oapijson
+
+fn minimal() -> oapidoc.OapiDoc
+    oapidoc.document("Pet Store", "1.0.0")
+
+fn ok_response() -> oapidoc.OapiResponse
+    oapidoc.response("200", "the pet")
+
+@test
+fn test_a_document_is_built_from_parts_and_reads_as_fields() [io]
+    let doc = minimal()
+
+    test.case("the title and the API's own version are where they were put")
+    test.assert(doc.info.title == "Pet Store")
+    test.assert(doc.info.version == "1.0.0")
+
+    test.case("and the OpenAPI version is a DIFFERENT field, which is the mistake made once")
+    test.assert(doc.openapi == "3.1.0")
+
+    test.case("an empty servers list means the specification's default, not a missing value")
+    test.assert(list.len(doc.servers) == 0)
+
+    test.case("a document grows a server, a path, a schema and a tag")
+    var d = oapidoc.with_server(doc, "https://api.example.com", "production")
+    d = oapidoc.with_tag(d, "pets", "everything about pets")
+    d = oapidoc.with_component_schema(d, "Pet", json.object([("type", json.string("object"))]))
+    let op = oapidoc.operation(OapiGet, "getPet", ok_response())
+    d = oapidoc.with_path(d, oapidoc.path_item("/pets/{id}", op))
+    test.assert(list.len(d.servers) == 1)
+    test.assert(list.len(d.tags) == 1)
+    test.assert(list.len(d.components.schemas) == 1)
+    test.assert(list.len(d.paths) == 1)
+
+    test.case("a path item takes a second operation, and a response takes a second media type")
+    let posted = oapidoc.with_operation(oapidoc.path_item("/pets", op),
+                                        oapidoc.operation(OapiPost, "addPet", ok_response()))
+    test.assert(list.len(posted.operations) == 2)
+    let r = oapidoc.with_content(ok_response(), "application/json", OapiSchemaAbsent)
+    test.assert(list.len(r.content) == 1)
+
+    test.case("and the operation is findable by method and template")
+    match oapidoc.find_operation(d, OapiGet, "/pets/{id}")
+        Some(found) => test.assert(found.operation_id == "getPet")
+        None        => test.assert(false)
+
+    test.case("a method the path does not answer is not found")
+    match oapidoc.find_operation(d, OapiDelete, "/pets/{id}")
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+@test
+fn test_a_path_items_parameters_merge_into_its_operations() [io]
+    // The specification merges the two lists, with an operation's entry
+    // overriding a path item's of the same name and location.  A caller
+    // reading `op.parameters` alone misses half the parameters on a
+    // well-written document, and that is the single most common bug in
+    // OpenAPI tooling.
+    let shared = oapidoc.parameter("id", OapiInPath, OapiSchemaAbsent)
+    let own = oapidoc.parameter("expand", OapiInQuery, OapiSchemaAbsent)
+    var op = oapidoc.operation(OapiGet, "getPet", ok_response())
+    op = OapiOperation { method: op.method, operation_id: op.operation_id,
+                         summary: op.summary, description: op.description,
+                         tags: op.tags, parameters: [own],
+                         request_body: op.request_body, responses: op.responses,
+                         security: op.security,
+                         has_own_security: op.has_own_security,
+                         deprecated: op.deprecated }
+    var item = oapidoc.path_item("/pets/{id}", op)
+    item = OapiPathItem { path_template: item.path_template, summary: item.summary,
+                          description: item.description, parameters: [shared],
+                          operations: item.operations }
+
+    test.case("the merge answers both")
+    test.assert(list.len(oapidoc.parameters_of(item, op)) == 2)
+
+    test.case("and the operation's own list alone answers one, which is why the merge is a function")
+    test.assert(list.len(op.parameters) == 1)
+
+    test.case("a path template's parameter names are readable on their own")
+    test.assert(oapidoc.template_params("/pets/{id}/toys/{toy}") == ["id", "toy"])
+    test.assert(oapidoc.template_params("/pets") == [])
+
+@test
+fn test_an_empty_security_override_is_not_an_absent_one() [io]
+    // An operation's own list REPLACES the document's, and an empty own
+    // list makes the operation public on a document that is otherwise
+    // authenticated.  Without `has_own_security` the two are the same
+    // value, and the difference is whether an endpoint needs a token.
+    let op = oapidoc.operation(OapiGet, "health", ok_response())
+
+    test.case("an operation with no override inherits the document's")
+    test.assert(op.has_own_security == false)
+
+    test.case("and one with an empty override is public")
+    let public_op = OapiOperation { method: op.method, operation_id: op.operation_id,
+                                    summary: op.summary, description: op.description,
+                                    tags: op.tags, parameters: op.parameters,
+                                    request_body: op.request_body,
+                                    responses: op.responses, security: [],
+                                    has_own_security: true,
+                                    deprecated: op.deprecated }
+    test.assert(list.len(oapidoc.security_of(minimal(), public_op)) == 0)
+
+@test
+fn test_a_ref_is_a_sum_and_the_external_ones_are_the_layer_seam() [io]
+    // A `$ref` to a URI means READING, which a core package may not do.
+    // The core says what it needs and the host performs.
+    let doc = minimal()
+
+    test.case("a document with no external references needs nothing fetched")
+    test.assert(list.len(oapidoc.external_refs(doc)) == 0)
+
+    test.case("a local reference resolves inside the document")
+    let with_schema = oapidoc.with_component_schema(doc, "Pet",
+                                                    json.object([("type", json.string("object"))]))
+    match oapidoc.resolve_local(with_schema, "#/components/schemas/Pet")
+        Some(_) => test.assert(true)
+        None    => test.assert(false)
+
+    test.case("and one pointing at nothing is dangling rather than silently empty")
+    match oapidoc.resolve_local(with_schema, "#/components/schemas/Nosuch")
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+    test.assert(list.len(oapidoc.dangling_refs(with_schema)) == 0)
+
+    test.case("an absent schema constrains nothing, which is different from an empty one")
+    let p = oapidoc.parameter("id", OapiInPath, OapiSchemaAbsent)
+    match p.schema
+        OapiSchemaAbsent => test.assert(true)
+        _                => test.assert(false)
+
+@test
+fn test_the_defaults_differ_by_location_which_is_why_they_are_published() [io]
+    test.case("a query parameter is `form` and a path parameter is `simple`")
+    match oapidoc.default_style(OapiInQuery)
+        OapiStyleForm => test.assert(true)
+        _             => test.assert(false)
+    match oapidoc.default_style(OapiInPath)
+        OapiStyleSimple => test.assert(true)
+        _               => test.assert(false)
+
+    test.case("`form` explodes and nothing else does, which is why `?tags=a&tags=b` is the default")
+    test.assert(oapidoc.default_explode(OapiStyleForm))
+    test.assert(oapidoc.default_explode(OapiStyleSimple) == false)
+
+    test.case("the method and location names are the document's own spellings")
+    test.assert(oapidoc.method_name(OapiGet) == "get")
+    test.assert(oapidoc.param_in_name(OapiInPath) == "path")
+
+    test.case("and a method is read case-insensitively, because a document is written by hand")
+    test.assert(oapidoc.method_named("GET") == Some(OapiGet))
+    test.assert(oapidoc.method_named("get") == Some(OapiGet))
+    test.assert(oapidoc.method_named("PROPFIND") == None)
+
+@test
+fn test_the_checks_are_the_document_errors_a_renderer_will_not_show() [io]
+    test.case("a well-formed document has nothing wrong with it")
+    test.assert(list.len(oapidoc.check(minimal())) == 0)
+
+    test.case("two operations sharing an operationId are refused, because the spec requires uniqueness")
+    var d = minimal()
+    d = oapidoc.with_path(d, oapidoc.path_item("/a",
+                                               oapidoc.operation(OapiGet, "same", ok_response())))
+    d = oapidoc.with_path(d, oapidoc.path_item("/b",
+                                               oapidoc.operation(OapiGet, "same", ok_response())))
+    test.assert(list.len(oapidoc.check(d)) > 0)
+
+@test
+fn test_a_document_round_trips_through_json_and_keeps_its_extensions() [io]
+    let doc = minimal()
+
+    test.case("rendering and reading back answers the same document")
+    match oapijson.from_json(oapijson.to_json(doc))
+        Ok(back) =>
+            test.assert(back.info.title == "Pet Store")
+            test.assert(back.openapi == doc.openapi)
+        Err(_)   => test.assert(false)
+
+    test.case("the text forms agree with the value form")
+    match oapijson.from_json_text(oapijson.to_json_text(doc))
+        Ok(back) => test.assert(back.info.version == "1.0.0")
+        Err(_)   => test.assert(false)
+
+    test.case("and the indented form is a different call rather than a flag")
+    test.assert(oapijson.to_json_pretty(doc) != oapijson.to_json_text(doc))
+
+    test.case("a `x-` key a gateway needs survives the round trip")
+    let with_ext = OapiDoc { openapi: doc.openapi, info: doc.info,
+                             servers: doc.servers, paths: doc.paths,
+                             webhooks: doc.webhooks, components: doc.components,
+                             security: doc.security, tags: doc.tags,
+                             extensions: [("x-gateway", json.string("edge"))] }
+    match oapijson.from_json(oapijson.to_json(with_ext))
+        Ok(back) => test.assert(list.len(back.extensions) == 1)
+        Err(_)   => test.assert(false)
+
+@test
+fn test_a_30_document_is_refused_rather_than_partly_read() [io]
+    // 3.0's schema object is JSON Schema draft-04 with OpenAPI's own
+    // extensions, so reading one as 3.1 gives WRONG answers about
+    // nullability rather than no answer.
+    let old = json.object([("openapi", json.string("3.0.3")),
+                           ("info", json.object([("title", json.string("Old")),
+                                                 ("version", json.string("1.0"))])),
+                           ("paths", json.object([]))])
+
+    test.case("it is recognisable as a document")
+    test.assert(oapijson.looks_like_document(old))
+
+    test.case("its version is readable before the refusal, so a caller can say something better")
+    test.assert(oapijson.declared_version(old) == "3.0.3")
+
+    test.case("and it is refused by name")
+    match oapijson.from_json(old)
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e
+                OapiUnsupportedVersion(v) => test.assert(v == "3.0.3")
+                _                         => test.assert(false)
+
+    test.case("the versions this package reads are a list rather than prose")
+    test.assert(oapijson.supported_versions() == ["3.1.0", "3.1.1"])
+
+    test.case("something that is not a document at all is a different answer")
+    test.assert(oapijson.looks_like_document(json.string("hello")) == false)
+
+@test
+fn test_the_lenient_parser_collects_rather_than_stopping() [io]
+    test.case("a structurally readable document comes back with its complaints beside it")
+    match oapijson.from_json_lenient(oapijson.to_json(minimal()))
+        Some(pair) => test.assert(list.len(pair.1) == 0)
+        None       => test.assert(false)
+
+    test.case("and a value that was not an object at all has nothing to collect from")
+    match oapijson.from_json_lenient(json.string("hello"))
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+    test.case("a schema reference renders as the JSON a document spells it with")
+    let r = OapiRefLocal("#/components/schemas/Pet")
+    test.assert(json.get_str(oapijson.schema_ref_json(r), "\u{0024}ref")
+                == Some("#/components/schemas/Pet"))
+
+    test.case("and reads back as the same reference")
+    match oapijson.schema_ref_of(oapijson.schema_ref_json(r))
+        OapiRefLocal(p) => test.assert(p == "#/components/schemas/Pet")
+        _               => test.assert(false)

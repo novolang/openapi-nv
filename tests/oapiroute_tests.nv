@@ -1,0 +1,291 @@
+// oapiroute_tests.nv — the paths object derived from the route table,
+// validation, and the diff.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`.
+//
+// THE CASES THIS SUITE EXISTS FOR: a catch-all route has NO OpenAPI
+// spelling and is refused rather than approximated; `drift` answers
+// nothing on a document that matches its service, which is the property
+// a CI job gates on; `validate_request` cannot fail, so a bad request
+// is a list and never an error; and `is_breaking` is asymmetric — a new
+// required REQUEST field breaks clients and a removed RESPONSE field
+// breaks them too, and the two are opposites for a server.
+
+use std.test
+use std.list
+use std.json
+use oapidoc
+use oapidiff
+use oapiroute
+use oapivalid
+use routepat
+use routetree
+use schcompile
+
+fn ok_response() -> oapidoc.OapiResponse
+    oapidoc.response("200", "the pet")
+
+fn table() -> routetree.RouteTree
+    var t = routetree.tree(routepat.strict_policy())
+    match routetree.insert(t, "/pets", routepat.methods_of([RouteGet, RoutePost]), 1)
+        Ok(a)  =>
+            match routetree.insert(a, "/pets/:id", routepat.methods_of([RouteGet]), 2)
+                Ok(b)  => b
+                Err(_) => a
+        Err(_) => t
+
+fn metas() -> [oapiroute.OapiRouteMeta]
+    [oapiroute.empty_meta(1, OapiGet), oapiroute.empty_meta(2, OapiGet)]
+
+@test
+fn test_the_two_spellings_convert_and_a_catch_all_does_not() [io]
+    test.case("a parameter becomes a brace")
+    test.assert(oapiroute.path_template("/users/:id") == Some("/users/{id}"))
+
+    test.case("a literal path is itself")
+    test.assert(oapiroute.path_template("/users") == Some("/users"))
+
+    test.case("and a catch-all has NO OpenAPI spelling, so it is refused rather than approximated")
+    match oapiroute.path_template("/files/*rest")
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+    test.assert(oapiroute.is_describable("/files/*rest") == false)
+    test.assert(oapiroute.is_describable("/users/:id"))
+
+    test.case("the reverse direction is total, because every template is a pattern")
+    test.assert(oapiroute.route_pattern("/users/{id}") == "/users/:id")
+
+@test
+fn test_a_document_is_derived_and_what_could_not_be_is_named() [io]
+    let pair = oapiroute.from_routes(table(), "Pet Store", "1.0.0", metas())
+
+    test.case("every route becomes a path item")
+    test.assert(list.len(pair.0.paths) == 2)
+
+    test.case("and the derivation reports what it could not do rather than being quietly short")
+    test.assert(list.len(pair.1) == 0)
+
+    test.case("a route with no meta is reported, not refused — it is a useful intermediate state")
+    let bare = oapiroute.from_routes(table(), "Pet Store", "1.0.0", [])
+    test.assert(list.len(bare.1) > 0)
+
+    test.case("a catch-all route is reported by name, with the route it was")
+    var t = routetree.tree(routepat.strict_policy())
+    match routetree.insert(t, "/files/*rest", routepat.methods_of([RouteGet]), 9)
+        Ok(with_wild) =>
+            let out = oapiroute.from_routes(with_wild, "Files", "1.0.0",
+                                            [oapiroute.empty_meta(9, OapiGet)])
+            match list.first(out.1)
+                Some(problem) =>
+                    match problem
+                        OapiRouteCatchAll(pattern, id) =>
+                            test.assert(pattern == "/files/*rest")
+                            test.assert(id == 9)
+                        _                              => test.assert(false)
+                None          => test.assert(false)
+        Err(_)        => test.assert(false)
+
+    test.case("the path items alone are available, for merging into a hand-written document")
+    test.assert(list.len(oapiroute.path_items(table(), metas()).0) == 2)
+
+    test.case("and the meta for a route and method is findable")
+    match oapiroute.find_meta(metas(), 2, OapiGet)
+        Some(m) => test.assert(m.route_id == 2)
+        None    => test.assert(false)
+
+@test
+fn test_drift_answers_nothing_when_the_document_describes_the_service() [io]
+    // The property a CI job gates on: the description and the code say
+    // the same thing, checked by a machine rather than by a reviewer
+    // remembering.
+    let derived = oapiroute.from_routes(table(), "Pet Store", "1.0.0", metas()).0
+
+    test.case("a derived document has no drift against the table it came from")
+    test.assert(list.len(oapiroute.drift(derived, table())) == 0)
+
+    test.case("and an empty document has one entry per undocumented operation")
+    let empty = oapidoc.document("Pet Store", "1.0.0")
+    test.assert(list.len(oapiroute.drift(empty, table())) > 0)
+
+    test.case("a document describing a path the table cannot reach is dead documentation")
+    let dead = oapidoc.with_path(empty,
+                                 oapidoc.path_item("/gone",
+                                                   oapidoc.operation(OapiGet, "gone",
+                                                                     ok_response())))
+    match list.first(oapiroute.drift(dead, routetree.tree(routepat.strict_policy())))
+        Some(d) =>
+            match d
+                OapiDriftUnreachable(t, m) =>
+                    test.assert(t == "/gone")
+                    test.assert(m == "get")
+                _                          => test.assert(false)
+        None    => test.assert(false)
+
+    test.case("and a table goes back to routes, for a mock server or a contract test")
+    test.assert(routetree.route_count(oapiroute.to_routes(derived,
+                                                          routepat.strict_policy()).0) == 2)
+
+@test
+fn test_validation_cannot_fail_and_compiling_is_where_the_errors_are() [io]
+    // A request that does not match its operation is THE ANSWER — a 400
+    // with a body naming what was wrong — so it is a list.  Everything
+    // that can genuinely be wrong is wrong in the DOCUMENT.
+    let doc = oapiroute.from_routes(table(), "Pet Store", "1.0.0", metas()).0
+
+    test.case("a document with no external refs compiles against an empty registry")
+    match oapivalid.compile(doc, schcompile.registry())
+        Ok(c)  =>
+            test.assert(c.operation_count == 2)
+
+            test.case("a request that matches answers an empty list")
+            test.assert(list.len(oapivalid.validate_request(c, "GET", "/pets", [],
+                                                            json.null())) == 0)
+
+            test.case("a path no operation describes is a failure about the REQUEST")
+            match list.first(oapivalid.validate_request(c, "GET", "/nosuch", [],
+                                                        json.null()))
+                Some(f) =>
+                    match f.location
+                        OapiFailRequest => test.assert(true)
+                        _               => test.assert(false)
+                None    => test.assert(false)
+
+            test.case("and which operation a request reaches is answerable on its own")
+            match oapivalid.operation_pointer(c, "GET", "/pets")
+                Some(p) => test.assert(p != "")
+                None    => test.assert(false)
+
+            test.case("the parts form exists for a caller that already split the target")
+            test.assert(list.len(oapivalid.validate_request_parts(c, "GET", "/pets", "",
+                                                                  [], json.null())) == 0)
+
+            test.case("a response can be validated too, which is the direction that catches bugs")
+            test.assert(list.len(oapivalid.validate_response(c, "GET", "/pets", 200, [],
+                                                             json.null())) == 0)
+
+            test.case("security is checked for PRESENCE only, and the name says so")
+            test.assert(oapivalid.security_present(c, "GET", "/pets", []))
+
+            test.case("a Content-Type selects a media type by essence and wildcard")
+            test.assert(oapivalid.content_type_for(c, "POST", "/pets",
+                                                   "application/json; charset=utf-8") == "")
+
+        Err(_) => test.assert(false)
+
+@test
+fn test_a_failure_names_the_request_the_document_and_what_was_expected() [io]
+    // "Your request is wrong" is a complaint; a pointer into the
+    // document that produced the rule is a conversation.
+    let f = OapiFailure { location: OapiFailBody, name: "",
+                          instance_location: "/age",
+                          schema_location: "/paths/~1pets/post/requestBody",
+                          message: "must be at least 0" }
+
+    test.case("the failure carries all three places")
+    test.assert(f.instance_location == "/age")
+    test.assert(f.schema_location != "")
+    test.assert(f.message != "")
+
+    test.case("its one-line report reads")
+    test.assert(oapivalid.failure_text(f) != "")
+
+    test.case("the location has a name, for a log line and for the JSON")
+    test.assert(oapivalid.failure_in_name(OapiFailBody) == "body")
+
+    test.case("failures are filterable by location, so a service can pick its own status codes")
+    test.assert(list.len(oapivalid.failures_in([f], OapiFailBody)) == 1)
+    test.assert(list.len(oapivalid.failures_in([f], OapiFailQuery)) == 0)
+
+    test.case("and they render as a shape a client can rely on across services")
+    test.assert(json.type_of(oapivalid.failures_json([f])) == "object")
+
+@test
+fn test_a_parameters_style_decides_what_its_raw_values_mean() [io]
+    // `?tags=a,b` and `?tags=a&tags=b` are the same parameter under
+    // different style/explode combinations, and a validator that
+    // assumed one of them rejects half the clients that exist.
+    let p = oapidoc.parameter("tags", OapiInQuery, OapiSchemaAbsent)
+
+    test.case("the exploded form is several raw values")
+    match oapivalid.decode_param(p, ["a", "b"])
+        Some(v) => test.assert(json.type_of(v) == "array")
+        None    => test.assert(false)
+
+    test.case("and encoding is the same rules in reverse, so a client and a server agree")
+    test.assert(list.len(oapivalid.encode_param(p, json.array([json.string("a"),
+                                                               json.string("b")]))) == 2)
+
+@test
+fn test_a_diff_compares_meaning_and_breaking_is_asymmetric() [io]
+    let a = oapidoc.document("Pet Store", "1.0.0")
+    let b = oapidoc.with_path(oapidoc.document("Pet Store", "1.1.0"),
+                              oapidoc.path_item("/pets",
+                                                oapidoc.operation(OapiGet, "listPets",
+                                                                  ok_response())))
+
+    test.case("a document compared with itself has no changes")
+    test.assert(list.len(oapidiff.diff(a, a)) == 0)
+
+    test.case("an added operation and a version bump are both reported")
+    test.assert(list.len(oapidiff.diff(a, b)) == 2)
+
+    test.case("an added operation breaks nobody")
+    test.assert(oapidiff.is_breaking(OapiOpAdded("/pets", "get"), OapiForClients) == false)
+
+    test.case("a removed one breaks every client")
+    test.assert(oapidiff.is_breaking(OapiOpRemoved("/pets", "get"), OapiForClients))
+
+    test.case("a new REQUIRED request parameter breaks clients and not servers")
+    let req = OapiParamAdded("/pets", "get", "since", true)
+    test.assert(oapidiff.is_breaking(req, OapiForClients))
+    test.assert(oapidiff.is_breaking(req, OapiForServers) == false)
+
+    test.case("and a new OPTIONAL one breaks neither")
+    let opt = OapiParamAdded("/pets", "get", "since", false)
+    test.assert(oapidiff.is_breaking(opt, OapiForClients) == false)
+
+    test.case("a removed response status breaks clients, which is the mirror of the request rule")
+    test.assert(oapidiff.is_breaking(OapiResponseChanged("/pets", "get", "404", false),
+                                     OapiForClients))
+
+    test.case("a deprecation is not breaking, and is the only warning a client gets")
+    test.assert(oapidiff.is_breaking(OapiOpDeprecated("/pets", "get"),
+                                     OapiForClients) == false)
+
+    test.case("a changed operationId breaks anybody with a generated client")
+    test.assert(oapidiff.is_breaking(OapiOpIdChanged("/pets", "get", "a", "b"),
+                                     OapiForClients))
+
+    test.case("and a schema change is breaking, because subtyping is undecidable and that is the safe way")
+    let sc = OapiSchemaChanged("/components/schemas/Pet", json.null(), json.null())
+    test.assert(oapidiff.is_breaking(sc, OapiForClients))
+
+@test
+fn test_the_diff_is_what_a_release_gate_reads() [io]
+    let a = oapidoc.document("Pet Store", "1.0.0")
+    let changes = [OapiOpAdded("/pets", "get"),
+                   OapiOpRemoved("/toys", "get")]
+
+    test.case("only the breaking ones")
+    test.assert(list.len(oapidiff.breaking(changes, OapiForClients)) == 1)
+
+    test.case("compatibility is one question over two documents")
+    test.assert(oapidiff.is_compatible(a, a, OapiForClients))
+
+    test.case("every change has a line and a place")
+    test.assert(oapidiff.change_text(OapiOpAdded("/pets", "get")) != "")
+    test.assert(oapidiff.change_pointer(OapiOpAdded("/pets", "get")) != "")
+
+    test.case("a removed operation has no place in the new document")
+    test.assert(oapidiff.change_pointer(OapiOpRemoved("/toys", "get")) == "")
+
+    test.case("the set renders as JSON for a tool that reports it")
+    test.assert(json.type_of(oapidiff.changes_json(changes, OapiForClients)) == "array")
+
+    test.case("and the bump it implies is a suggestion, derived rather than counted by hand")
+    test.assert(oapidiff.suggested_bump(changes, OapiForClients) == "major")
+    test.assert(oapidiff.suggested_bump([OapiOpAdded("/pets", "get")],
+                                        OapiForClients) == "minor")
+
+    test.case("schema equality is STRUCTURAL, and saying so is the honest form of the limit")
+    test.assert(oapidiff.schema_eq(json.null(), json.null()))
