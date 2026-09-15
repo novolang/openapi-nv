@@ -5,6 +5,10 @@ All notable changes to openapi-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.0.2 — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1 — 2026-09-11
 
 The **interface**: every signature and every effect row, and no bodies.
@@ -46,3 +50,22 @@ The **interface**: every signature and every effect row, and no bodies.
 - **No `@tier(embedded)` claim.** `json.*` is not admitted at that tier.
 - **Two dependencies**: schema-nv by range, router-nv by path until it
   is published.
+
+### Design notes
+
+Public type names are unique across a whole assembly, dependencies
+included, so every type here is prefixed `Oapi` rather than `OpenApi`:
+the variants carry it too, and `OapiInPath` is shorter than
+`OpenApiInPath`. `OapiDoc` follows the standard library's `TomlDoc`,
+`YamlDoc` and `XmlDoc`; `OapiMethod` because http-codec-nv publishes
+`H1Method` and router-nv `RouteMethod`; `OapiSchemaRef` because `Ref`
+is url-nv's and schema-nv owns the `Sch` prefix; `OapiFailure` because
+`Error` is a prelude trait. The modules are prefixed because `doc`,
+`validate` and `diff` are names other packages will want.
+
+The half of a derived schema that would close with no language change
+is a `Serializer` implementation that records a shape instead of
+writing bytes. It would give field names and kinds from a sample value
+and could fill none of the other rows in the README's table. It is left
+out because a schema that is right about names and silently wrong about
+optionality is worse than one a person wrote.

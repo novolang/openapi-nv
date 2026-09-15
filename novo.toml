@@ -1,6 +1,6 @@
 [package]
 name        = "openapi-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "OpenAPI 3.1 as a typed document value that renders to and parses from the standard library's JSON, a paths object DERIVED from a router-nv route table rather than typed twice, request and response validation against schema-nv's compiled schemas as pure arithmetic that cannot fail, and a document diff that says which changes are breaking.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
