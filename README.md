@@ -250,7 +250,7 @@ the shape of a type.
   [mime-nv](https://novo-lang.org/packages/mime-nv) owns the full rules.
 - **A build for a microcontroller.** A document is a tree of growable
   lists and the JSON value it renders to is a host handle, so this
-  package makes no device claim.
+  package does not build for a microcontroller with no heap allocator.
 
 ## Related packages
 
