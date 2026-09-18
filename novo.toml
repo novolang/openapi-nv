@@ -53,7 +53,7 @@ novo        = ">= 0.8.9"
 # `core`, so `dep-layer` holds.  Its `external_refs` shape is also the
 # one this package copies for its own `$ref`s, which is why the two
 # compose rather than each having their own opinion about fetching.
-schema-nv = "^0.0.1"
+schema-nv = "^0.0.2"
 
 # router-nv, FOR THE PATHS OBJECT.
 #
